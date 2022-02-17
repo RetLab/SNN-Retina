@@ -20,6 +20,8 @@ import pdb
 import random
 from copy import deepcopy
 from retinamodels import *
+# import os
+os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 
 
 def index_transfrom(index, augment):
@@ -39,10 +41,13 @@ class RetinaData(Dataset):
     
     def __init__(self, root, stimulus, train=True, transform=None, augment=10):
         """
-        stimulus: type of stimulus (Gratings/NaturalImage1)
+        stimulus: type of stimulus (Gratings/NaturalImage1/NaturalImage2)
         """
+        # self.root = os.path.expanduser(root)
         self.stimulus = stimulus
+        # self.transform = transform
         self.augment = augment
+        # self.target_transform = target_transform
         self.train = train
 
         stim, resp = get_data(root, self.stimulus, augment)
@@ -86,9 +91,6 @@ class RetinaData(Dataset):
 
 
 
-
-# Different path for bitahub and local machine
-
 # Load Data
 def get_data(DataPath, stimulus, augment=10,steps=30):
     """
@@ -100,11 +102,13 @@ def get_data(DataPath, stimulus, augment=10,steps=30):
     # Stimulus and Response Path
     RespPath = os.path.join(DataPath, 'SpikeCount')
     StimPath = os.path.join(DataPath, 'Stimulus')
-    if stimulus == 'NaturalImage1':
+    # print(StimPath)
+    if stimulus in ['NaturalImage1', 'NaturalImage2']:
         if augment == 1:
             stim = np.load(os.path.join(StimPath, 'NaturalImages.npy'))
             resp = np.load(os.path.join(RespPath, stimulus+'_count.npy'))
             stim = stim / 255
+            # breakpoint()
         else:
             path = os.path.join(StimPath, 'NaturalImagesDA{}.npy'.format(augment))
             resp = np.load(os.path.join(RespPath, stimulus+'_count.npy'))
@@ -141,76 +145,98 @@ def get_data(DataPath, stimulus, augment=10,steps=30):
                 np.save(path, stim)
 
     else:
-        print('bad stimulus')
+        print('waiting for adding code')
         exit()
+    #stimilus * #n_neurons * #n_trails * #n_bins
+    # resp = resp[:,:,0,:]
+    # resp = resp.max(axis=2)
+    # resp = resp.mean(axis=2)
     return stim, resp 
 
 
 
 
     
-def train(args, model, device, train_loader, optimizer, epoch):
+def train(args, loss_f, model, device, train_loader, optimizer, epoch, k=1):
     model.train()
     train_loss = 0
     samples = 0
     right_samples = 0
+    inrange_samples = 0
     samples_positive = 0
     right_samples_positive = 0
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
         optimizer.zero_grad()
         output = model(data)
+        # breakpoint()
         target_mean = target.mean(dim=2)
         target_max, _ = target.max(dim=2)
         target_min, _ = target.min(dim=2)
         mask = (target_max > 0)
 
-        loss = F.mse_loss(output, target_mean, reduction='sum')
+        if args.weight != 0:
+            loss = loss_f(output, target_mean) + args.weight * loss_f(output[mask], target_mean[mask])
+        else:
+            loss = loss_f(output, target_mean)
         train_loss += loss
         output = torch.round(output)
         samples += output.numel()
         samples_positive += output[mask].numel()
+        inrange_samples += ((output >= target_mean - k) & (output <= target_mean + k)).sum().item()
         right_samples += ((output >= target_min) & (output <= target_max)).sum().item()
         right_samples_positive += ((output[mask] >= target_min[mask]) & (output[mask] <= target_max[mask])).sum().item()
         
-
         loss.backward()
         optimizer.step()
 
-    print('Epoch:{} Training Average Loss:{:.2f}, Accuracy:{:.3f}, Accuracy2:{:.3f}'.format(epoch, train_loss/(batch_idx+1), right_samples/samples, right_samples_positive/samples_positive))
+
+    print('Epoch:{} Training Average Loss:{:.2f}, Accuracy1:{:.3f}, Accuracy2:{:.3f}, Accuracy3:{:.3f}'.format(epoch, train_loss/(batch_idx+1), inrange_samples/samples, right_samples/samples, right_samples_positive/samples_positive))
     return
 
-def test(args, model, device, test_loader):
+def test(args, loss_f, model, device, test_loader, k=1):
     model.eval()
     test_loss = 0
     samples = 0
     right_samples = 0
+    inrange_samples = 0 
     samples_positive = 0
     right_samples_positive = 0
     index = 0
 
     with torch.no_grad():
         for data, target in test_loader:
+
             data, target = data.to(device), target.to(device)
             output = model(data)
+            # target.shape: batchsize * neurons * trails
             target_max, _ = target.max(dim=2)
             target_min, _ = target.min(dim=2)
             
+
             mask = (target_max > 0)
             target_mean = target.mean(dim=2)
-            
-            loss = F.mse_loss(output, target_mean,reduction='sum')
+            if args.weight != 0:
+                loss = loss_f(output, target_mean) + args.weight * loss_f(output[mask], target_mean[mask])
+            else:
+                loss = loss_f(output, target_mean)
+            # loss = loss(output, target_mean,reduction='sum')
             output = torch.round(output)
+            # acc = ((output >= target_min) & (output <= target_max)).sum().item() / output.numel()
             index += 1
 
 
             samples += output.numel()
             samples_positive += output[mask].numel()
+            # breakpoint()
             right_samples += ((output >= target_min) & (output <= target_max)).sum().item()
+            inrange_samples += ((output >= target_mean - k) & (output <= target_mean + k)).sum().item()
             right_samples_positive += ((output[mask] >= target_min[mask]) & (output[mask] <= target_max[mask])).sum().item()
             test_loss += loss 
-        print('\tTesting Average Loss:{:.2f}, Accuracy:{:.3f}, Accuracy2:{:.3f}'.format(test_loss/(index+1), right_samples/samples, right_samples_positive/samples_positive))
-    return right_samples/samples, right_samples_positive/samples_positive, test_loss/(index+1)
+            # print('Test set: Average loss: {:.4f} Acc{:.3f}\n'.format(test_loss, acc))
+        # breakpoint()
+        print('\tTesting Average Loss:{:.2f}, Accuracy1:{:.3f}, Accuracy2:{:.3f}, Accuracy:{:.3f}'.format(test_loss/(index+1), inrange_samples/samples, right_samples/samples, right_samples_positive/samples_positive))
+    return inrange_samples/samples, right_samples/samples, right_samples_positive/samples_positive, test_loss/(index+1)
         
 
 
@@ -224,8 +250,9 @@ def CrossCorrelation(x, y):
     return loss_list
 
 def plot_response(TaskPath, rows, columns, dataloader, model, args,device, train=False):
-    Stimulus = ['grating', 'NI1']
+    Stimulus = ['grating', 'NI1', 'NI2']
     fig = plt.figure(figsize=(10*columns, 10*rows),facecolor='w')
+    fig.suptitle('Movie{}  avground'.format(args.stim + 1))
 
     for index, (data, target) in enumerate(dataloader):
         output = model(data.to(device)) #[0:samples]
@@ -237,10 +264,12 @@ def plot_response(TaskPath, rows, columns, dataloader, model, args,device, train
         for i in range(output_shape[0]):
             if train and ((index + 1) * args.batch_size + i + 1  > rows * columns):
                 break
-            fig.add_subplot(rows, columns, index+i+1)
+            fig.add_subplot(rows, columns, index * args.batch_size+i+1)
             predict = output[i]
+            # breakpoint()
             actual = target[i]
             actual_mean = actual.mean(axis=1)
+            # Note: the sort method change array itself and return None
             actual.sort(axis=-1)
             actual_max = actual[:,-1]
             actual_min = actual[:,0]
@@ -250,16 +279,22 @@ def plot_response(TaskPath, rows, columns, dataloader, model, args,device, train
             plt.scatter(np.arange(actual.shape[0]), actual_max, c='r', label='actual_max',marker='_')
             plt.scatter(np.arange(actual.shape[0]), actual_mean, c='g', label='actual_mean',marker='_')
             plt.yticks(np.arange(12))
+            # plt.xticks(np.arange())
+            # plt.xlabel('# Neuron')
+            # plt.ylabel('# Spikes')
             plt.title('Stimulus {}'.format(i))
             plt.legend() 
     i = 0
     if train:
         while True:
             i += 1
+            # if args.mse:
             if args.mem:
                 newname = os.path.join(TaskPath, 'output', '{}_{}_mem_train_v{:d}.pdf'.format(args.arch, Stimulus[args.stim], i))
             else:
                 newname = os.path.join(TaskPath, 'output', '{}_{}_sc_train_v{:d}.pdf'.format(args.arch, Stimulus[args.stim], i))
+            # else:
+            #     newname = os.path.join(TaskPath, 'Gratings_train_L{}_DA{}_v{:d}.pdf'.format(args.weight, args.augment, i))
             if os.path.exists(newname):
                 continue
             plt.savefig(newname)
@@ -271,6 +306,8 @@ def plot_response(TaskPath, rows, columns, dataloader, model, args,device, train
                 newname = os.path.join(TaskPath, 'output', '{}_{}_mem_test_v{:d}.pdf'.format(args.arch, Stimulus[args.stim], i))
             else:
                 newname = os.path.join(TaskPath, 'output', '{}_{}_sc_test_v{:d}.pdf'.format(args.arch, Stimulus[args.stim], i))
+            # else:
+                # newname = os.path.join(TaskPath, 'Gratings_test_L{}_DA{}_v{:d}.pdf'.format(args.weight, args.augment, i))
             if os.path.exists(newname):
                 continue
             plt.savefig(newname)
@@ -280,15 +317,16 @@ def plot_response(TaskPath, rows, columns, dataloader, model, args,device, train
 def UniqueName(path, extend_name):
     i = 1
     while os.path.exists(path + '_{}'.format(i) + extend_name):
+        # path = path + '_{}'.format(i)
         i += 1
     return path + '_{}'.format(i) + extend_name
 
 def main():
     # Training settings
     parser = argparse.ArgumentParser(description='PyTorch Retina Model')
-    parser.add_argument('--arch', help='Network used to model retina:1. 3dcnnsnn 2. snnlstm 3. snn')
+    parser.add_argument('--arch', help='Network used to model retina:1. 3dcnn 2. 3dcnnsnn 3. 2dcnnsnn 4. 2dcnnlstm 5. snnlstm 6. snn')
     parser.add_argument('--stim', type=int, default=1, metavar='N',
-                        help='0:Gratings, 1:NaturalImage1')
+                        help='0:Gratings, 1:NaturalImage1, 2:NaturalImage2, else:movie(not finished)')
     parser.add_argument('--augment', type=int, default=10, metavar='N',
                         help='the times of samples')
     parser.add_argument('--batch-size', '-b', type=int, default=10, metavar='N',
@@ -299,6 +337,8 @@ def main():
                         help='number of epochs to train (default: 15)')
     parser.add_argument('--lr', type=float, default=0.0001, metavar='LR',
                         help='learning rate (default: 0.05)')
+    parser.add_argument('--k', type=float, default=1, metavar='k',
+                        help='the vary range of mean value')
     parser.add_argument('--gamma', type=float, default=0.7, metavar='M',
                         help='Learning rate step gamma (default: 0.7)')
     parser.add_argument('--no-cuda', action='store_true', default=False,
@@ -311,30 +351,35 @@ def main():
                         help='For Saving the current Model')
     parser.add_argument('--local', action='store_true', default=False,
                     help='default in server')
+    parser.add_argument('--fb', action='store_true', default=False,
+                    help='whether use feedback for cnn3dsnn (only cnn3dsnn supports)')
     parser.add_argument('--mem', action='store_true', default=False,
                     help='use mem as output in snn')
-    parser.add_argument('--weight', type=int, default=0,metavar='N')
+    parser.add_argument('--loss', default='mse', help='the type of loss function')
+    # parser.add_argument('--loss', action='store_true', default=False,
+    #                 help='whether use loss to determine best model, default(acc)')
+    parser.add_argument('--weight', type=int, default=0,metavar='N',
+                    help='the weight to strength the positive term in loss')
     parser.add_argument('--channel', default='[8,16,32]', help='channels list')
 
     
     args = parser.parse_args()
     use_cuda = not args.no_cuda and torch.cuda.is_available()
     # print(args.stimulus)
-    Stimulus = ['grating', 'NI1']
-    full_stimulus = ['Gratings', 'NaturalImage1']
+    Stimulus = ['grating', 'NI1', 'NI2']
+    full_stimulus = ['Gratings', 'NaturalImage1', 'NaturalImage2', 'Movie1Exp1', 'Movie1Exp2', 'Movie2Exp1', 'Movie2Exp2']
 
 
-    if args.arch not in ['cnn3dsnn', 'snnlstm', 'snn']:
+    if args.arch not in ['cnn3d', 'cnn3dsnn', 'cnn2dsnn', 'cnn2dlstm', 'snnlstm', 'snn']:
         print('{} is not supported now'.format(args.arch))
-        args.mem = True
         exit(0)
-    if args.arch == "snnlstm":
-        args.mem = False
+    if args.arch == 'cnn2dsnn':
+        args.augment = 1
     
 
     stimulus = Stimulus[args.stim]
     print('\n\n'+'='*15 + 'settings' + '='*15)
-    # print settings
+    # print(args)
     for k in args.__dict__:
         print(k + ": " + str(args.__dict__[k]))
     print('='*15 + 'settings' + '='*15 + '\n')
@@ -349,26 +394,31 @@ def main():
     random.seed(args.seed)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
-
-    # you can set data path at local machine and remote server here
+    # using path below need run the code at upper path
     if args.local:
-        DataPath = '../processed_data'
-        TaskPath = '../processed_data/models'
+        DataPath = 'C:\\data\\processed_data'
+        TaskPath = os.path.join(DataPath, 'models')
+        # TaskPath = '../processed_data/models'
     else:
         DataPath = '/data/RetinaData/processed_data'
         TaskPath = '/output'
 
 
 
+
     transform=transforms.Compose([
+        # transforms.ToPILImage(),
         transforms.ToTensor()
-        ])
-    
-    
     if args.mem:
-        model = eval('{}_{}_mem({})'.format(args.arch, stimulus, args.channel)).to(device)
+        if args.fb:
+            model = eval('{}_{}_mem_fb({})'.format(args.arch, stimulus, args.channel)).to(device)
+        else:
+            model = eval('{}_{}_mem({})'.format(args.arch, stimulus, args.channel)).to(device)
     else:
-        model = eval('{}_{}({})'.format(args.arch, stimulus, args.channel)).to(device)
+        if args.fb:
+            model = eval('{}_{}_fb({})'.format(args.arch, stimulus, args.channel)).to(device)
+        else:
+            model = eval('{}_{}({})'.format(args.arch, stimulus, args.channel)).to(device)
         
     print(model)
 
@@ -376,33 +426,48 @@ def main():
                        transform=transform, augment=args.augment)
     dataset2 = RetinaData(root=DataPath, stimulus=full_stimulus[args.stim], train=False,
                        transform=transform, augment=args.augment)
+    # stim_shape = dataset2.targets.shape
     
     train_loader = torch.utils.data.DataLoader(dataset1, batch_size=args.batch_size,shuffle=True, num_workers=0)
     test_loader = torch.utils.data.DataLoader(dataset2, batch_size=args.test_batch_size, num_workers=0)
 
-
+    if args.loss == 'mse':
+        loss_p = torch.nn.MSELoss(reduction='sum')
+    elif args.loss == 'poisson':
+        loss_p = torch.nn.PoissonNLLLoss(log_input=False)
+    else:
+        print('the loss is not supported now')
+        exit(0)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scheduler = StepLR(optimizer, step_size=5, gamma=args.gamma)
     start_time = time.time()
     loss1 = 1e10
-    acc1 = 0
     loss2 = 1e10
-    acc2 = 0
+
+    # store loss and acc
+    acc_l1 = 0
+    acc_l2 = 0
+    acc_l3 = 0
+    acc_a1 = 0
+    acc_a2 = 0
+    acc_a3 = 0
     for epoch in range(1, args.epochs + 1):
         time1 = time.time()
-        train(args, model, device, train_loader, optimizer, epoch)
-        acc_v, acc_v2, loss_v = test(args, model, device, test_loader)
+        train(args, loss_p, model, device, train_loader, optimizer, epoch, k=args.k)
+        acc_1, acc_2, acc_3, loss_v = test(args, loss_p, model, device, test_loader, k=args.k)
         # if loss_v < loss:
         if loss_v < loss1:
-            acc1 = acc_v 
             loss1 = loss_v
-            acc_p1 = acc_v2
+            acc_l1 = acc_1
+            acc_l2 = acc_2
+            acc_l3 = acc_3
             best_state1 = deepcopy(model.state_dict())
 
-        if acc_v > acc2:
-            acc2 = acc_v 
-            acc_p2 = acc_v2
+        if acc_2 > acc_a2:
             loss2 = loss_v
+            acc_a1 = acc_1
+            acc_a2 = acc_2
+            acc_a3 = acc_3
             best_state2 = deepcopy(model.state_dict()) 
 
         scheduler.step()
@@ -413,17 +478,22 @@ def main():
     print('time used {:.1f}min'.format(time_used//60))
 
     if args.save:
+        # print('saving model(acc={:.3f}, loss={:.1f})...'.format(acc, loss))
         if args.mem:
             base_name = '{}_{}_mem'.format(args.arch, stimulus)
+            # uname = UniqueName(os.path.join(TaskPath, 'model', '{}_{}_mem'.format(args.arch, stimulus)), '.pt')
         else:
             base_name = '{}_{}'.format(args.arch, stimulus)
 
         rows = int(len(dataset2) / args.augment) # plot all the test data but only one train data
         columns = args.augment
-        if acc1 == acc2 and loss1 == loss2:
+            # uname = UniqueName(os.path.join(TaskPath, 'model', '{}_{}'.format(args.arch, stimulus)), '.pt')
+        # print(uname)
+        if acc_l1 == acc_a1 and loss1 == loss2:
             uname = UniqueName(os.path.join(TaskPath, 'model', base_name), '.pt')
             torch.save(best_state1, uname)
-            print('best acc/loss model', uname,'\n','acc:{}\nacc_p:{}\nloss:{}'.format(acc1, acc_p1, loss1))
+            print('best acc/loss model', uname,'\n','acc1:{:.4f}\nacc2:{:.4f}\nacc3:{:.4f}\nloss:{:.4f}'.format(acc_l1, acc_l2, acc_l3, loss1))
+            # print('best acc/loss model', uname,'\n','acc:{}\nacc_p:{}\nloss:{}'.format(acc1, acc_p1, loss1))
             model.load_state_dict(best_state1)
             plot_response(TaskPath=TaskPath, rows=rows, columns=columns, dataloader=train_loader, model=model, args=args,device=device, train=True)
             plot_response(TaskPath=TaskPath, rows=rows, columns=columns, dataloader=test_loader, model=model, args=args,device=device, train=False)
@@ -432,8 +502,10 @@ def main():
             torch.save(best_state1, uname1)
             uname2 = UniqueName(os.path.join(TaskPath, 'model', base_name), '.pt')
             torch.save(best_state2, uname2)
-            print('best loss model', uname1,'\n','acc:{}\nacc_p:{}\nloss:{}'.format(acc1,acc_p1, loss1))
-            print('best acc model', uname2,'\n','acc:{}\nacc_p:{}\nloss:{}'.format(acc2,acc_p2, loss2))
+            print('best loss model', uname1,'\n','acc1:{:.4f}\nacc2:{:.4f}\nacc3:{:.4f}\nloss:{:.4f}'.format(acc_l1, acc_l2, acc_l3, loss1))
+            print('best acc model', uname2,'\n','acc1:{:.4f}\nacc2:{:.4f}\nacc3:{:.4f}\nloss:{:.4f}'.format(acc_a1, acc_a2, acc_a3, loss2))
+            # print('best loss model', uname1,'\n','acc:{}\nacc_p:{}\nloss:{}'.format(acc1,acc_p1, loss1))
+            # print('best acc model', uname2,'\n','acc:{}\nacc_p:{}\nloss:{}'.format(acc2,acc_p2, loss2))
             model.load_state_dict(best_state1)
             plot_response(TaskPath=TaskPath, rows=rows, columns=columns, dataloader=train_loader, model=model, args=args,device=device, train=True)
             plot_response(TaskPath=TaskPath, rows=rows, columns=columns, dataloader=test_loader, model=model, args=args,device=device, train=False)
